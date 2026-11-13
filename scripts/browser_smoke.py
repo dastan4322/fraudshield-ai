@@ -1,4 +1,5 @@
 """Run against local production services; requires playwright and Chromium."""
+import os
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 with sync_playwright() as p:
@@ -6,7 +7,7 @@ with sync_playwright() as p:
     page=browser.new_page(viewport={"width":1440,"height":1100},device_scale_factor=1)
     errors=[]
     page.on("pageerror",lambda e:errors.append(str(e)))
-    page.goto("http://127.0.0.1:3000",wait_until="networkidle")
+    page.goto(os.getenv("BASE_URL","http://127.0.0.1:3000"),wait_until="networkidle")
     page.get_by_text("200",exact=True).first.wait_for()
     page.get_by_label("Review threshold").fill("0.7")
     page.get_by_text("0.70",exact=True).wait_for()

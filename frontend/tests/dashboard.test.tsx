@@ -17,5 +17,13 @@ expect(screen.getByText("0.70")).toBeDefined();
 fireEvent.click(screen.getByText("Upload dataset"));
 fireEvent.change(screen.getByLabelText("Upload CSV"),{target:{files:[new File(["amount\n3"],"data.csv",{type:"text/csv"})]}});
 await waitFor(()=>expect(screen.getByText("1 rows · 0 duplicate rows")).toBeDefined());
+fireEvent.change(screen.getByLabelText("Map amount"),{target:{value:"total"}});
+fireEvent.click(screen.getByText("Apply column mapping"));
+expect(screen.getByLabelText("Map total")).toBeDefined();
+});
+it("shows backend errors instead of invented demo data",async()=>{
+vi.stubGlobal("fetch",vi.fn(async()=>({ok:false,json:async()=>({detail:"Backend unavailable"})})));
+render(<Home/>);
+await waitFor(()=>expect(screen.getByRole("alert").textContent).toContain("Backend unavailable"));
 });
 });

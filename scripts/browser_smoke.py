@@ -21,6 +21,7 @@ with sync_playwright() as p:
     assert page.locator(".contribution").count()==4
     page.get_by_role("button",name="Overview",exact=True).click()
     Path("docs").mkdir(exist_ok=True)
+    page.wait_for_timeout(1800)  # allow the 1500ms Recharts entrance animation to settle
     page.screenshot(path="docs/dashboard.png",full_page=False)
     page.set_viewport_size({"width":390,"height":844})
     assert page.locator("main").bounding_box()["width"]<=390

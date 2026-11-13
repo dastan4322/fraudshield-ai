@@ -60,6 +60,7 @@ with sync_playwright() as p:
     page.get_by_role("button",name="Open",exact=True).first.click()
     page.get_by_text("See the risk. Focus your review.",exact=True).wait_for()
     page.get_by_text("200",exact=True).first.wait_for()
+    page.wait_for_timeout(1800)  # allow the 1500ms Recharts entrance animation to settle
     page.screenshot(path="docs/dashboard.png",full_page=False)
     page.get_by_role("button",name="Account workspace",exact=True).click()
     page.get_by_text("Delete account and all saved data",exact=True).click()

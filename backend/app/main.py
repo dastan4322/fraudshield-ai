@@ -60,6 +60,15 @@ async def guard(request: Request, call_next):
     length = request.headers.get("content-length")
     if length and int(length) > 2_000_000:
         return Response('{"detail":"Upload limit is 2 MB"}', 413, media_type="application/json")
+    if request.method in {"POST", "PUT", "PATCH"}:
+        chunks = []
+        size = 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > 2_000_000:
+                return Response('{"detail":"Request limit is 2 MB"}', 413, media_type="application/json")
+            chunks.append(chunk)
+        request._body = b"".join(chunks)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Cache-Control"] = "no-store"
@@ -181,7 +190,7 @@ def training(body: Training, request: Request):
         raise ValueError("Target column is missing.")
     if frame[body.target].isna().any() or frame[body.target].nunique()!=2:
         raise ValueError("Target must have exactly two non-missing classes.")
-    labels = frame[body.target].astype(str)
+    labels = frame[body.target].map(lambda v: str(int(v)) if isinstance(v, (int, float)) and float(v).is_integer() else str(v))
     if body.positive_class not in set(labels):
         raise ValueError("Positive class was not found.")
     frame[body.target] = (labels == body.positive_class).astype(int)

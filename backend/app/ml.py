@@ -51,6 +51,9 @@ def train(frame, target, algorithm="logistic", review_cost=1., missed_cost=25.):
     features = [c for c in frame if c != target]
     if not features or any(frame[c].nunique() > 500 for c in features if not pd.api.types.is_numeric_dtype(frame[c])):
         raise ValueError("Select features without identifiers or high-cardinality text (maximum 500 categories).")
+    text_columns = frame[features].select_dtypes(exclude="number").columns
+    if sum(frame[c].nunique() for c in text_columns) > 1000:
+        raise ValueError("Combined categorical feature cardinality exceeds 1,000.")
     X, y = frame[features], frame[target]
     fit, test, yf, yt = train_test_split(X, y, test_size=.2, stratify=y, random_state=SEED)
     fit, val, yf, yv = train_test_split(fit, yf, test_size=.25, stratify=yf, random_state=SEED)

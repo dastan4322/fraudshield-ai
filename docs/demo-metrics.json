@@ -1,0 +1,89 @@
+[
+  {
+    "id": "demo-logistic",
+    "source": "synthetic demonstration",
+    "metrics": {
+      "pr_auc": 0.4901164813345679,
+      "roc_auc": 0.8116849243609807,
+      "precision": 0.13432835820895522,
+      "recall": 1.0,
+      "f1": 0.23684210526315788,
+      "brier": 0.07751450301957612,
+      "confusion_matrix": [
+        [
+          39,
+          174
+        ],
+        [
+          0,
+          27
+        ]
+      ]
+    },
+    "training_seconds": 0.26291841999989174,
+    "split": {
+      "train": 720,
+      "validation": 240,
+      "test": 240
+    },
+    "threshold": 0.04
+  },
+  {
+    "id": "demo-forest",
+    "source": "synthetic demonstration",
+    "metrics": {
+      "pr_auc": 0.4164321581053847,
+      "roc_auc": 0.7944705268648931,
+      "precision": 0.1125,
+      "recall": 1.0,
+      "f1": 0.20224719101123595,
+      "brier": 0.08273202522873575,
+      "confusion_matrix": [
+        [
+          0,
+          213
+        ],
+        [
+          0,
+          27
+        ]
+      ]
+    },
+    "training_seconds": 0.48889482300000964,
+    "split": {
+      "train": 720,
+      "validation": 240,
+      "test": 240
+    },
+    "threshold": 0.0
+  },
+  {
+    "id": "demo-xgboost",
+    "source": "synthetic demonstration",
+    "metrics": {
+      "pr_auc": 0.469050851732807,
+      "roc_auc": 0.8297687358720223,
+      "precision": 0.2032520325203252,
+      "recall": 0.9259259259259259,
+      "f1": 0.3333333333333333,
+      "brier": 0.08168139277747287,
+      "confusion_matrix": [
+        [
+          115,
+          98
+        ],
+        [
+          2,
+          25
+        ]
+      ]
+    },
+    "training_seconds": 0.13725707100002182,
+    "split": {
+      "train": 720,
+      "validation": 240,
+      "test": 240
+    },
+    "threshold": 0.07
+  }
+]

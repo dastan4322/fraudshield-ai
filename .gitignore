@@ -232,3 +232,6 @@ uploads/
 *.sqlite*
 *.csv
 !sample_data/synthetic.csv
+data/
+*.db
+*.db-*

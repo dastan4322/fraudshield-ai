@@ -10,7 +10,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, IsolationForest
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import average_precision_score, roc_auc_score, precision_score, recall_score, f1_score, confusion_matrix, brier_score_loss
+from sklearn.metrics import average_precision_score, roc_auc_score, precision_score, recall_score, f1_score, confusion_matrix, brier_score_loss, precision_recall_curve, roc_curve
 from xgboost import XGBClassifier
 
 SEED = 42
@@ -35,6 +35,18 @@ def validate(frame, features=None):
         if np.isinf(frame[col]).any():
             raise ValueError("Infinite numeric values are unsupported.")
 
+def curves(y, p):
+    precision, recall, _ = precision_recall_curve(y,p)
+    fpr,tpr,_ = roc_curve(y,p)
+    from sklearn.calibration import calibration_curve
+    actual,predicted = calibration_curve(y,p,n_bins=10,strategy="quantile")
+    budget=max(1,int(len(y)*.05))
+    return {"precision_recall":[{"recall":float(r),"precision":float(v)} for r,v in zip(recall,precision)],
+            "roc":[{"fpr":float(f),"tpr":float(t)} for f,t in zip(fpr,tpr)],
+            "calibration":[{"predicted":float(p),"actual":float(a)} for p,a in zip(predicted,actual)],
+            "recall_at_precision_80":float(max(recall[precision>=.8],default=0)),
+            "precision_at_review_budget_5pct":float(np.asarray(y)[np.argsort(-p)[:budget]].mean())}
+
 def metrics(y, p, threshold):
     predicted = p >= threshold
     return {"pr_auc": float(average_precision_score(y, p)), "roc_auc": float(roc_auc_score(y, p)),
@@ -42,7 +54,7 @@ def metrics(y, p, threshold):
             "recall": float(recall_score(y, predicted, zero_division=0)), "f1": float(f1_score(y, predicted, zero_division=0)),
             "brier": float(brier_score_loss(y, p)), "confusion_matrix": confusion_matrix(y, predicted, labels=[0,1]).tolist()}
 
-def train(frame, target, algorithm="logistic", review_cost=1., missed_cost=25.):
+def train(frame, target, algorithm="logistic", review_cost=1., missed_cost=25., split="stratified", weighting=True, smote=False, calibrated=True, parameters=None, time_column=None):
     validate(frame)
     if target not in frame or frame[target].isna().any() or set(frame[target].unique()) != {0, 1}:
         raise ValueError("Target must contain both binary labels 0 and 1 without missing values.")
@@ -55,8 +67,19 @@ def train(frame, target, algorithm="logistic", review_cost=1., missed_cost=25.):
     if sum(frame[c].nunique() for c in text_columns) > 1000:
         raise ValueError("Combined categorical feature cardinality exceeds 1,000.")
     X, y = frame[features], frame[target]
-    fit, test, yf, yt = train_test_split(X, y, test_size=.2, stratify=y, random_state=SEED)
-    fit, val, yf, yv = train_test_split(fit, yf, test_size=.25, stratify=yf, random_state=SEED)
+    if split=="chronological":
+        if not time_column or time_column not in X:
+            raise ValueError("Chronological splitting requires an explicit time column.")
+        order = X.sort_values(time_column).index
+        n = len(order)
+        a,b = int(n*.6),int(n*.8)
+        fit,val,test = X.loc[order[:a]],X.loc[order[a:b]],X.loc[order[b:]]
+        yf,yv,yt = y.loc[fit.index],y.loc[val.index],y.loc[test.index]
+        if any(v.nunique()!=2 or v.value_counts().min()<6 for v in [yf,yv,yt]):
+            raise ValueError("Each chronological partition needs both classes with at least six examples.")
+    else:
+        fit, test, yf, yt = train_test_split(X, y, test_size=.2, stratify=y, random_state=SEED)
+        fit, val, yf, yv = train_test_split(fit, yf, test_size=.25, stratify=yf, random_state=SEED)
     numeric = fit.select_dtypes(include="number").columns.tolist()
     categorical = [c for c in features if c not in numeric]
     preprocess = ColumnTransformer([
@@ -68,8 +91,28 @@ def train(frame, target, algorithm="logistic", review_cost=1., missed_cost=25.):
                    "xgboost": XGBClassifier(n_estimators=80, max_depth=3, n_jobs=1, random_state=SEED)}
     if algorithm not in classifiers:
         raise ValueError("Choose logistic, forest or xgboost.")
-    pipeline = Pipeline([("preprocess", preprocess), ("model", classifiers[algorithm])])
-    model = CalibratedClassifierCV(pipeline, cv=3)
+    classifier=classifiers[algorithm]
+    if not weighting and algorithm in {"logistic","forest"}:
+        classifier.set_params(class_weight=None)
+    if weighting and algorithm=="xgboost":
+        classifier.set_params(scale_pos_weight=float((yf==0).sum()/(yf==1).sum()))
+    if parameters:
+        classifier.set_params(**parameters)
+    steps=[("preprocess",preprocess)]
+    if smote:
+        from imblearn.over_sampling import SMOTE
+        from imblearn.pipeline import Pipeline as ImbalancedPipeline
+        steps.append(("smote",SMOTE(random_state=SEED,k_neighbors=2)))
+        pipeline=ImbalancedPipeline(steps+[("model",classifier)])
+    else:
+        pipeline=Pipeline(steps+[("model",classifier)])
+    cv=3
+    if split=="chronological":
+        from sklearn.model_selection import TimeSeriesSplit
+        cv=list(TimeSeriesSplit(n_splits=3).split(fit))
+        if any(yf.iloc[a].nunique()!=2 or yf.iloc[b].nunique()!=2 for a,b in cv):
+            raise ValueError("Chronological calibration folds must each contain both classes.")
+    model = CalibratedClassifierCV(pipeline, cv=cv) if calibrated else pipeline
     start = time.perf_counter()
     model.fit(fit, yf)
     elapsed = time.perf_counter() - start
@@ -87,7 +130,10 @@ def train(frame, target, algorithm="logistic", review_cost=1., missed_cost=25.):
     return {"model": model, "features": features, "numeric": numeric, "algorithm": algorithm, "threshold": threshold,
             "metrics": metrics(yt, pt, threshold), "training_seconds": elapsed, "latency_ms_per_row": latency,
             "threshold_curve": curve, "split": {"train": len(fit), "validation": len(val), "test": len(test)},
-            "baseline": fit.iloc[0:1].copy(), "version": "1", "source": "custom", "review_cost": review_cost, "missed_cost": missed_cost}
+            "baseline": fit.iloc[0:1].copy(), "background": fit.sample(min(20,len(fit)),random_state=SEED).copy(),
+            "curves":curves(yt,pt), "validation_metrics":metrics(yv,pv,threshold),
+            "experiment":{"split":split,"weighting":weighting,"smote":smote,"calibrated":calibrated,"parameters":parameters or {}},
+            "version": __import__("hashlib").sha256((frame.to_csv(index=False)+str(parameters)+str(split)+str(weighting)+str(smote)+str(calibrated)+algorithm).encode()).hexdigest()[:16], "source": "custom", "review_cost": review_cost, "missed_cost": missed_cost}
 
 def predict(bundle, frame):
     validate(frame, bundle["features"])

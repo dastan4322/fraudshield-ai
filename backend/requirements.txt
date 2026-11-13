@@ -6,3 +6,11 @@ scikit-learn==1.7.2
 xgboost==3.1.2
 python-multipart==0.0.22
 joblib==1.5.2
+shap==0.54.1
+reportlab==5.1.0
+SQLAlchemy==2.1.8
+alembic==1.20.1
+psycopg[binary]==3.3.9
+argon2-cffi==25.1.0
+optuna==5.0.0
+imbalanced-learn==0.14.2

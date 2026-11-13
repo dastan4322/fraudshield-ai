@@ -13,10 +13,13 @@ from html import escape
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import IsolationForest
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+from .database import initialize, DB, Artifact, Resource
+from .accounts import router as accounts_router, current, require_csrf
 from .ml import synthetic, train, predict, explain, validate
 
 models = {}
@@ -27,6 +30,7 @@ log = logging.getLogger("fraudshield")
 
 @asynccontextmanager
 async def lifespan(app):
+    initialize()
     data = synthetic()
     for algorithm in ["logistic", "forest", "xgboost"]:
         bundle = await asyncio.to_thread(train, data, "is_fraud", algorithm)
@@ -40,8 +44,9 @@ async def lifespan(app):
     yield
 
 app = FastAPI(title="FraudShield AI", version="1.0.0", lifespan=lifespan)
+app.include_router(accounts_router)
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000").split(","),
-                   allow_methods=["GET", "POST", "DELETE"], allow_headers=["Content-Type", "X-Workspace-Token"])
+                   allow_methods=["GET", "POST", "DELETE"], allow_headers=["Content-Type", "X-Workspace-Token", "X-CSRF-Token"], allow_credentials=True)
 
 @app.middleware("http")
 async def guard(request: Request, call_next):
@@ -69,6 +74,11 @@ async def guard(request: Request, call_next):
                 return Response('{"detail":"Request limit is 2 MB"}', 413, media_type="application/json")
             chunks.append(chunk)
         request._body = b"".join(chunks)
+    try:
+        require_csrf(request)
+    except HTTPException as exc:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail":exc.detail},status_code=exc.status_code)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Cache-Control"] = "no-store"
@@ -80,6 +90,9 @@ async def invalid(request, exc):
     return JSONResponse(status_code=422, content={"detail": str(exc)})
 
 def owner(request):
+    identity=current(request,required=False)
+    if identity:
+        return identity
     configured = os.getenv("WORKSPACE_TOKEN")
     supplied = request.headers.get("x-workspace-token", "")
     if not configured or not secrets.compare_digest(configured, supplied):
@@ -87,14 +100,26 @@ def owner(request):
     return "private"
 
 def get_model(model_id, request):
-    if model_id not in models:
-        raise HTTPException(404, "Model not found")
-    if not model_id.startswith("demo-"):
-        owner(request)
-    return models[model_id]
+    if model_id.startswith("demo-") and model_id in models:
+        return models[model_id]
+    identity=owner(request)
+    if model_id=="local-trained" and identity=="private" and model_id in models:
+        return models[model_id]
+    if identity=="private":
+        if model_id in models and model_owners.get(model_id)=="private":
+            return models[model_id]
+    else:
+        with DB() as db:
+            artifact=db.get(Artifact,model_id)
+            if artifact and artifact.user_id==identity:
+                import joblib
+                return joblib.load(io.BytesIO(artifact.data))
+    raise HTTPException(404,"Model not found")
+
+model_owners={}
 
 def metadata(key, bundle):
-    return {"id": key, **{k:v for k,v in bundle.items() if k not in {"model", "baseline"}}}
+    return {"id": key, **{k:v for k,v in bundle.items() if k not in {"model", "baseline", "background"}}}
 
 class Prediction(BaseModel):
     model_id: str = "demo-logistic"
@@ -126,8 +151,19 @@ def health():
 
 @app.get("/api/models")
 def list_models(request: Request):
-    private = os.getenv("WORKSPACE_TOKEN") and secrets.compare_digest(request.headers.get("x-workspace-token",""), os.getenv("WORKSPACE_TOKEN"))
-    return [metadata(k,v) for k,v in models.items() if k.startswith("demo-") or private]
+    entries=[metadata(k,v) for k,v in models.items() if k.startswith("demo-")]
+    try:
+        identity=owner(request)
+    except HTTPException:
+        return entries
+    if identity=="private":
+        entries.extend(metadata(k,v) for k,v in models.items() if model_owners.get(k)=="private" or k=="local-trained")
+    else:
+        from sqlalchemy import select
+        import joblib
+        with DB() as db:
+            entries.extend(metadata(a.id,joblib.load(io.BytesIO(a.data))) for a in db.scalars(select(Artifact).where(Artifact.user_id==identity)))
+    return entries
 
 @app.get("/api/demo/transactions")
 def demo():
@@ -176,12 +212,12 @@ def inference(body: Prediction, request: Request):
 @app.post("/api/explain")
 def explanation(body: Prediction, request: Request):
     bundle = get_model(body.model_id, request)
-    return {"method":"Reference feature occlusion, not SHAP", "contributions": explain(bundle, pd.DataFrame(body.records[:1])),
-            "limitation":"Changes relative to one reference record; contributions are not additive or causal."}
+    from .explanations import shap_explain
+    return shap_explain(bundle, pd.DataFrame(body.records[:20]))
 
 @app.post("/api/models/train", status_code=202)
 def training(body: Training, request: Request):
-    owner(request)
+    identity=owner(request)
     if any(j["status"] in {"queued", "running"} for j in jobs.values()):
         raise HTTPException(409, "One training job is already active.")
     frame = pd.DataFrame(body.records)
@@ -199,39 +235,59 @@ def training(body: Training, request: Request):
             raise ValueError("Features must exist and exclude the target.")
         frame = frame[body.features + [body.target]]
     identifier = secrets.token_hex(12)
-    jobs[identifier] = {"status":"queued"}
+    jobs[identifier] = {"status":"queued","owner":identity}
     def run():
-        jobs[identifier] = {"status":"running"}
+        jobs[identifier] = {"status":"running","owner":identity}
         try:
             bundle = train(frame, body.target, body.algorithm, body.review_cost, body.missed_cost)
-            models[identifier] = bundle
-            jobs[identifier] = {"status":"complete", "model_id":identifier}
+            if identity=="private":
+                models[identifier] = bundle
+                model_owners[identifier]=identity
+            else:
+                import joblib
+                buffer=io.BytesIO();joblib.dump(bundle,buffer)
+                with DB() as db:
+                    from .database import User
+                    if db.get(User,identity) is None:
+                        raise ValueError("Account deleted during training.")
+                    db.add(Artifact(id=identifier,user_id=identity,data=buffer.getvalue()));db.commit()
+            jobs[identifier] = {"status":"complete", "model_id":identifier,"owner":identity}
         except Exception as exc:
-            jobs[identifier] = {"status":"failed", "detail":str(exc)}
+            jobs[identifier] = {"status":"failed", "detail":"Training failed. Check feature types, class counts and input values.","owner":identity}
     executor.submit(run)
     return {"job_id":identifier}
 
 @app.get("/api/jobs/{job_id}")
 def job(job_id: str, request: Request):
-    owner(request)
-    if job_id not in jobs:
+    identity=owner(request)
+    if job_id not in jobs or jobs[job_id].get("owner")!=identity:
         raise HTTPException(404, "Job not found")
-    return jobs[job_id]
+    return {k:v for k,v in jobs[job_id].items() if k!="owner"}
 
 @app.delete("/api/workspace")
 def delete(request: Request):
-    owner(request)
-    if any(j["status"] in {"queued","running"} for j in jobs.values()):
-        raise HTTPException(409, "Wait for active training to finish before deleting.")
+    identity=owner(request)
+    if any(j["status"] in {"queued","running"} and j.get("owner")==identity for j in jobs.values()):
+        raise HTTPException(409,"Wait for active training to finish before deleting.")
+    from sqlalchemy import delete as sql_delete
+    if identity!="private":
+        with DB() as db:
+            db.execute(sql_delete(Artifact).where(Artifact.user_id==identity))
+            db.execute(sql_delete(Resource).where(Resource.user_id==identity));db.commit()
     for key in list(models):
-        if not key.startswith("demo-"):
-            del models[key]
-    jobs.clear()
+        if model_owners.get(key)==identity:
+            del models[key];model_owners.pop(key,None)
+    for key in list(jobs):
+        if jobs[key].get("owner")==identity:
+            del jobs[key]
     return {"deleted":True}
 
 @app.post("/api/reports")
 def report(body: Report, request: Request):
     rows = result(body, request)
+    if body.format=="pdf":
+        from .pdf import make_pdf
+        return Response(make_pdf(rows,get_model(body.model_id,request),body.model_id,body.threshold),media_type="application/pdf",headers={"Content-Disposition":"attachment; filename=report.pdf"})
     if body.format=="html":
         summary = {"model":body.model_id, "threshold":body.threshold, "rows":len(rows), "flagged":sum(r["prediction"] for r in rows)}
         content = "<!doctype html><html><meta charset='utf-8'><title>FraudShield report</title><h1>Investigation report</h1><pre>"+escape(json.dumps(summary, indent=2))+"</pre><p>Decision support only. Not proof of fraud. Synthetic demo models are not validated on real financial data.</p></html>"

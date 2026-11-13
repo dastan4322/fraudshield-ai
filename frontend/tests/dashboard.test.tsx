@@ -3,7 +3,7 @@ import {render,screen,fireEvent,waitFor} from "@testing-library/react";
 import {describe,it,expect,vi} from "vitest";
 import {filtered} from "../lib/risk";
 import Home from "../app/page";
-vi.mock("recharts",()=>({ResponsiveContainer:()=>null,BarChart:()=>null,Bar:()=>null,XAxis:()=>null,YAxis:()=>null,Tooltip:()=>null,CartesianGrid:()=>null}));
+vi.mock("recharts",()=>({ResponsiveContainer:()=>null,BarChart:()=>null,Bar:()=>null,XAxis:()=>null,YAxis:()=>null,Tooltip:()=>null,CartesianGrid:()=>null,LineChart:()=>null,Line:()=>null,Legend:()=>null}));
 describe("analyst workflow",()=>{
 it("filters IDs and risk together",()=>{
 expect(filtered([{transaction_id:"12",risk_category:"high"},{transaction_id:"13",risk_category:"low"}],"1","high")).toHaveLength(1);

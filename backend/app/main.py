@@ -6,6 +6,7 @@ import logging
 import os
 import secrets
 import time
+import threading
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -18,12 +19,15 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import text as sql_text
 from .database import initialize, DB, Artifact, Resource
 from .accounts import router as accounts_router, current, require_csrf
 from .ml import synthetic, train, predict, explain, validate
 
 models = {}
 jobs = {}
+training_lock=threading.Lock()
 executor = ThreadPoolExecutor(max_workers=1)
 limits = defaultdict(deque)
 log = logging.getLogger("fraudshield")
@@ -52,10 +56,11 @@ app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http
 async def guard(request: Request, call_next):
     now = time.monotonic()
     key = request.client.host if request.client else "unknown"
-    queue = limits[key]
+    is_auth=request.url.path.startswith("/api/auth/") and request.method=="POST"
+    queue = limits[key+(":auth" if is_auth else "")]
     while queue and queue[0] < now-60:
         queue.popleft()
-    if len(queue) >= 120:
+    if len(queue) >= (10 if is_auth else 120):
         return Response('{"detail":"Rate limit exceeded"}', 429, media_type="application/json")
     queue.append(now)
     if len(limits) > 10000:
@@ -63,6 +68,8 @@ async def guard(request: Request, call_next):
             if not limits[host] or limits[host][-1] < now-60:
                 del limits[host]
     length = request.headers.get("content-length")
+    if length and (not length.isdecimal()):
+        return Response('{"detail":"Invalid Content-Length"}',400,media_type="application/json")
     if length and int(length) > 2_000_000:
         return Response('{"detail":"Upload limit is 2 MB"}', 413, media_type="application/json")
     if request.method in {"POST", "PUT", "PATCH"}:
@@ -80,9 +87,15 @@ async def guard(request: Request, call_next):
         from fastapi.responses import JSONResponse
         return JSONResponse({"detail":exc.detail},status_code=exc.status_code)
     response = await call_next(request)
+    log.info(json.dumps({"method":request.method,"path":request.url.path,"status":response.status_code}))
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Cache-Control"] = "no-store"
     return response
+
+@app.exception_handler(SQLAlchemyError)
+async def database_error(request, exc):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=503,content={"detail":"Workspace storage is temporarily unavailable."})
 
 @app.exception_handler(ValueError)
 async def invalid(request, exc):
@@ -127,7 +140,7 @@ class Prediction(BaseModel):
     threshold: float = Field(default=.5, ge=0, le=1)
 
 class Training(BaseModel):
-    records: list[dict[str, float | str]] = Field(min_length=100, max_length=10000)
+    records: list[dict[str, float | str | None]] = Field(min_length=100, max_length=10000)
     target: str
     algorithm: str = "logistic"
     features: list[str] | None = None
@@ -137,6 +150,7 @@ class Training(BaseModel):
 
 class Report(Prediction):
     format: str = "csv"
+    review_statuses: dict[str,str] = Field(default_factory=dict,max_length=10000)
 
 def result(body, request):
     bundle = get_model(body.model_id, request)
@@ -147,7 +161,9 @@ def result(body, request):
 
 @app.get("/api/health")
 def health():
-    return {"status":"ok", "models_ready": bool(models)}
+    with DB() as db:
+        db.execute(sql_text("SELECT 1"))
+    return {"status":"ok", "models_ready": bool(models), "database":"ok"}
 
 @app.get("/api/models")
 def list_models(request: Request):
@@ -220,6 +236,12 @@ def training(body: Training, request: Request):
     identity=owner(request)
     if any(j["status"] in {"queued", "running"} for j in jobs.values()):
         raise HTTPException(409, "One training job is already active.")
+    if identity!="private":
+        from sqlalchemy import select,func
+        with DB() as db:
+            count=db.scalar(select(func.count()).select_from(Artifact).where(Artifact.user_id==identity))
+            if count>=20:
+                raise HTTPException(409,"Model limit: delete an older model before training.")
     frame = pd.DataFrame(body.records)
     validate(frame)
     if body.target not in frame:
@@ -230,12 +252,19 @@ def training(body: Training, request: Request):
     if body.positive_class not in set(labels):
         raise ValueError("Positive class was not found.")
     frame[body.target] = (labels == body.positive_class).astype(int)
-    if body.features:
+    if body.features is not None:
+        if not body.features:
+            raise ValueError("Select at least one feature.")
         if body.target in body.features or set(body.features)-set(frame):
             raise ValueError("Features must exist and exclude the target.")
         frame = frame[body.features + [body.target]]
     identifier = secrets.token_hex(12)
-    jobs[identifier] = {"status":"queued","owner":identity}
+    with training_lock:
+        if any(j["status"] in {"queued","running"} for j in jobs.values()):
+            raise HTTPException(409,"One training job is already active.")
+        if len(jobs)>=100:
+            raise HTTPException(409,"Job history limit reached. Clear your workspace.")
+        jobs[identifier] = {"status":"queued","owner":identity}
     def run():
         jobs[identifier] = {"status":"running","owner":identity}
         try:
@@ -285,12 +314,17 @@ def delete(request: Request):
 @app.post("/api/reports")
 def report(body: Report, request: Request):
     rows = result(body, request)
+    for row in rows:
+        row["review_status"]=body.review_statuses.get(row["transaction_id"],"unreviewed")
     if body.format=="pdf":
         from .pdf import make_pdf
         return Response(make_pdf(rows,get_model(body.model_id,request),body.model_id,body.threshold),media_type="application/pdf",headers={"Content-Disposition":"attachment; filename=report.pdf"})
     if body.format=="html":
-        summary = {"model":body.model_id, "threshold":body.threshold, "rows":len(rows), "flagged":sum(r["prediction"] for r in rows)}
+        bundle=get_model(body.model_id,request)
+        summary = {"model":body.model_id, "version":bundle["version"], "source":bundle["source"], "threshold":body.threshold, "rows":len(rows), "flagged":sum(r["prediction"] for r in rows)}
         content = "<!doctype html><html><meta charset='utf-8'><title>FraudShield report</title><h1>Investigation report</h1><pre>"+escape(json.dumps(summary, indent=2))+"</pre><p>Decision support only. Not proof of fraud. Synthetic demo models are not validated on real financial data.</p></html>"
+        bars="".join(f'<p>{category}: {sum(r["risk_category"]==category for r in rows)} <meter min="0" max="{len(rows)}" value="{sum(r["risk_category"]==category for r in rows)}"></meter></p>' for category in ["low","medium","high"])
+        content=content.replace("</html>","<h2>Risk distribution</h2>"+bars+"<h2>Held-out training metrics</h2><pre>"+escape(json.dumps(bundle["metrics"],indent=2))+"</pre><p>These metrics describe the model evaluation split, not the current upload. Investigate flagged records and verify evidence manually.</p></html>")
         return Response(content, media_type="text/html", headers={"Content-Disposition":"attachment; filename=report.html"})
     if body.format not in {"csv","summary"}:
         raise ValueError("Choose csv, summary or html.")
@@ -300,3 +334,17 @@ def report(body: Report, request: Request):
     for col in frame.select_dtypes(include="object"):
         frame[col] = frame[col].map(lambda x: "'" + x if isinstance(x,str) and x.lstrip().startswith(("=","+","-","@","\t","\r")) else x)
     return Response(frame.to_csv(index=False), media_type="text/csv", headers={"Content-Disposition":"attachment; filename=predictions.csv"})
+
+@app.delete("/api/models/{model_id}")
+def delete_model(model_id: str, request: Request):
+    identity=owner(request)
+    if model_id.startswith("demo-") or model_id=="local-trained":
+        raise HTTPException(403,"Administrator/demo models cannot be deleted here.")
+    get_model(model_id,request)
+    if identity=="private":
+        models.pop(model_id,None);model_owners.pop(model_id,None)
+    else:
+        from sqlalchemy import delete as sql_delete
+        with DB() as db:
+            db.execute(sql_delete(Artifact).where(Artifact.id==model_id,Artifact.user_id==identity));db.commit()
+    return {"deleted":True}

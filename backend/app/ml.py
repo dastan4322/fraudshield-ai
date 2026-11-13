@@ -63,6 +63,8 @@ def train(frame, target, algorithm="logistic", review_cost=1., missed_cost=25., 
     features = [c for c in frame if c != target]
     if not features or any(frame[c].nunique() > 500 for c in features if not pd.api.types.is_numeric_dtype(frame[c])):
         raise ValueError("Select features without identifiers or high-cardinality text (maximum 500 categories).")
+    if frame[features].duplicated().any():
+        raise ValueError("Duplicate feature rows must be resolved before splitting to prevent leakage.")
     text_columns = frame[features].select_dtypes(exclude="number").columns
     if sum(frame[c].nunique() for c in text_columns) > 1000:
         raise ValueError("Combined categorical feature cardinality exceeds 1,000.")
@@ -127,11 +129,16 @@ def train(frame, target, algorithm="logistic", review_cost=1., missed_cost=25., 
     start = time.perf_counter()
     pt = model.predict_proba(test)[:,1]
     latency = (time.perf_counter()-start)*1000/len(test)
-    return {"model": model, "features": features, "numeric": numeric, "algorithm": algorithm, "threshold": threshold,
+    shifted=test.copy()
+    for f in numeric:
+        if f!=time_column:
+            shifted[f]=shifted[f]*1.5
+    shift_metrics=metrics(yt,model.predict_proba(shifted)[:,1],threshold)
+    return {"model": model, "features": features, "numeric": numeric, "algorithm": algorithm, "target":target, "threshold": threshold,
             "metrics": metrics(yt, pt, threshold), "training_seconds": elapsed, "latency_ms_per_row": latency,
             "threshold_curve": curve, "split": {"train": len(fit), "validation": len(val), "test": len(test)},
             "baseline": fit.iloc[0:1].copy(), "background": fit.sample(min(20,len(fit)),random_state=SEED).copy(),
-            "curves":curves(yt,pt), "validation_metrics":metrics(yv,pv,threshold),
+            "curves":curves(yt,pt), "shift_metrics":shift_metrics, "validation_metrics":metrics(yv,pv,threshold),
             "experiment":{"split":split,"weighting":weighting,"smote":smote,"calibrated":calibrated,"parameters":parameters or {}},
             "version": __import__("hashlib").sha256((frame.to_csv(index=False)+str(parameters)+str(split)+str(weighting)+str(smote)+str(calibrated)+algorithm).encode()).hexdigest()[:16], "source": "custom", "review_cost": review_cost, "missed_cost": missed_cost}
 

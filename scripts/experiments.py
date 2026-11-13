@@ -26,21 +26,18 @@ def run(frame, target, trials=3, time_column=None, source="fixture"):
             record={k:v for k,v in bundle.items() if k not in {"model","baseline","background"}}
             record.update({"algorithm":algorithm,"variant":label,"best_validation_pr_auc":study.best_value,
                            "hypothesis":f"{label} affects review workload and probability quality.","dataset":source})
-            # A fixed deterministic stress scenario evaluated separately, never used in selection.
-            shifted=frame.sample(frac=.2,random_state=42).copy()
-            numeric=[f for f in bundle["numeric"] if f!=time_column]
-            for f in numeric:
-                shifted[f]=shifted[f]*1.5
-            record["distribution_shift_stress"]=metrics(shifted[target],predict(bundle,shifted),bundle["threshold"])
-            record["distribution_shift_limitation"]="Synthetic feature scaling stress on a fixed sample that may include training rows; diagnostic only, not held-out performance."
+            record["distribution_shift_stress"]=bundle["shift_metrics"]
+            record["distribution_shift_limitation"]="Fixed 1.5x scaling of held-out test numeric features, excluding time; stress scenario only, never used in selection."
+            from app.explanations import shap_explain
+            record["shap_sample_importance"]=shap_explain(bundle,frame.head(5))["global_importance"]
             record["cost_sensitivity"]=[{"missed_cost":c,"threshold":min(bundle["threshold_curve"],key=lambda r:r["false_positives"]+r["false_negatives"]*c)["threshold"]} for c in [5,25,100]]
             report["runs"].append(record)
         if time_column:
             try:
-                bundle=train(frame,target,algorithm,split="chronological",time_column=time_column,parameters=study.best_params)
-                report["runs"].append({"variant":"chronological","algorithm":algorithm,**{k:v for k,v in bundle.items() if k not in {"model","baseline","background"}}})
+                bundle=train(frame,target,algorithm,split="chronological",time_column=time_column)
+                report["runs"].append({"variant":"chronological","algorithm":algorithm,"selection":"Fixed defaults; stratified search parameters are not reused across chronological partitions.",**{k:v for k,v in bundle.items() if k not in {"model","baseline","background"}}})
             except ValueError as exc:
-                report["runs"].append({"variant":"chronological","algorithm":algorithm,"status":"rejected","reason":str(exc)})
+                report["runs"].append({"variant":"chronological","algorithm":algorithm,"selection":"Fixed defaults; stratified search parameters are not reused across chronological partitions.","status":"rejected","reason":str(exc)})
     return report
 
 if __name__=="__main__":

@@ -32,3 +32,15 @@ def test_invalid_targets_and_types():
     bundle = train(data,"is_fraud")
     with pytest.raises(ValueError,match="numeric"):
         predict(bundle,data.head().assign(amount="not a number"))
+
+def test_preprocessing_fitted_inside_training_folds():
+    from sklearn.model_selection import train_test_split, StratifiedKFold
+    data=synthetic()
+    bundle=train(data,"is_fraud")
+    X=data.drop(columns="is_fraud");y=data.is_fraud
+    fit,_,yf,_=train_test_split(X,y,test_size=.2,stratify=y,random_state=42)
+    fit,_,yf,_=train_test_split(fit,yf,test_size=.25,stratify=yf,random_state=42)
+    indices,_=next(StratifiedKFold(3).split(fit,yf))
+    scaler=bundle["model"].calibrated_classifiers_[0].estimator.named_steps["preprocess"].named_transformers_["numeric"].named_steps["scale"]
+    np.testing.assert_allclose(scaler.mean_,fit.iloc[indices][bundle["numeric"]].mean().values)
+    assert not np.allclose(scaler.mean_,X[bundle["numeric"]].mean().values)

@@ -28,9 +28,10 @@ def make_pdf(rows, bundle, model_id, threshold):
     metric_rows += [["Confusion matrix",str(bundle["metrics"]["confusion_matrix"])]]
     table=Table(metric_rows,colWidths=[220,260]);table.setStyle(TableStyle([("GRID",(0,0),(-1,-1),.5,colors.lightgrey)]))
     story.append(table)
-    if "is_fraud" in rows[0] and set(r["is_fraud"] for r in rows).issubset({0,1}):
+    target=bundle.get("target","is_fraud")
+    if target in rows[0] and set(r[target] for r in rows).issubset({0,1}):
         from sklearn.metrics import confusion_matrix
-        actual=confusion_matrix([r["is_fraud"] for r in rows],[r["prediction"] for r in rows],labels=[0,1]).tolist()
+        actual=confusion_matrix([r[target] for r in rows],[r["prediction"] for r in rows],labels=[0,1]).tolist()
         story.append(Paragraph("Uploaded label confusion matrix: "+escape(str(actual)),styles["Normal"]))
     story += [Spacer(1,20),Paragraph("Limitations and recommendations",styles["Heading2"]),
               Paragraph("Scores support manual investigation and do not prove fraud. Prioritize flagged cases, verify source information, and document review decisions. Lower thresholds generally increase workload. Synthetic models are not validated on real financial data. No regulated banking certification is claimed.",styles["Normal"])]

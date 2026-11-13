@@ -1,4 +1,5 @@
 import hashlib
+import re
 import os
 import secrets
 import smtplib
@@ -32,7 +33,7 @@ def current(request, required=True):
         return user.id if user else None
 
 def require_csrf(request):
-    if request.method in {"POST","PUT","PATCH","DELETE"} and request.cookies.get(COOKIE):
+    if request.method in {"POST","PUT","PATCH","DELETE"} and request.cookies.get(COOKIE) and current(request,required=False):
         supplied=request.headers.get("x-csrf-token","")
         if not secrets.compare_digest(supplied,csrf(request.cookies[COOKIE])):
             raise HTTPException(403,"Missing or invalid CSRF token.")
@@ -43,7 +44,7 @@ class Credentials(BaseModel):
 
 def email(value):
     value=value.strip().lower()
-    if "@" not in value or "." not in value.split("@")[-1]:
+    if not re.fullmatch(r"[a-z0-9._+%\-]+@[a-z0-9.\-]+\.[a-z]{2,63}",value):
         raise HTTPException(422,"Enter a valid email address.")
     return value
 

@@ -12,6 +12,7 @@ parser.add_argument("--algorithm", choices=["logistic","forest","xgboost"], defa
 parser.add_argument("--output", default="artifacts")
 args = parser.parse_args()
 frame = pd.read_csv(args.csv)
+frame = frame.drop_duplicates().reset_index(drop=True)
 # Kaggle contract, including original feature ordering.
 if args.target == "Class":
     required = ["Time"] + [f"V{i}" for i in range(1,29)] + ["Amount", "Class"]
@@ -23,8 +24,9 @@ if len(frame)>10000:
     from sklearn.model_selection import train_test_split
     frame, _ = train_test_split(frame, train_size=10000, stratify=frame[args.target], random_state=42)
 bundle = train(frame, args.target, args.algorithm)
+bundle["source"]="Kaggle creditcard.csv (user supplied)" if args.target=="Class" else "custom local CSV"
 out = Path(args.output)
 out.mkdir(parents=True, exist_ok=True)
 joblib.dump(bundle, out / "model.joblib")
-(out / "metrics.json").write_text(json.dumps({k:v for k,v in bundle.items() if k not in {"model","baseline"}}, indent=2))
+(out / "metrics.json").write_text(json.dumps({k:v for k,v in bundle.items() if k not in {"model","baseline","background"}}, indent=2))
 print((out / "metrics.json").read_text())

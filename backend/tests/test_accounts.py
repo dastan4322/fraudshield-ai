@@ -101,3 +101,40 @@ def test_unlabeled_anomaly_analysis():
         res=client.post("/api/datasets/analyze",files={"file":("test.csv",csv)})
         assert res.status_code==200,res.text
         assert len(res.json()["anomaly_percentiles"])==30
+
+def test_missing_values_training_and_model_deletion():
+    with TestClient(app) as client:
+        _,headers=register(client)
+        rows=client.get("/api/demo/transactions").json()["records"]
+        rows[0]["amount"]=None
+        response=client.post("/api/models/train",headers=headers,json={"records":rows,"target":"is_fraud"})
+        assert response.status_code==202
+        key=response.json()["job_id"]
+        for _ in range(100):
+            state=client.get("/api/jobs/"+key).json()
+            if state["status"] in {"complete","failed"}:
+                break
+            time.sleep(.1)
+        assert state["status"]=="complete"
+        assert client.delete("/api/models/"+key,headers=headers).status_code==200
+        assert client.get("/api/models/"+key+"/metrics").status_code==404
+
+def test_expired_session_and_auth_rate_limit():
+    with TestClient(app) as client:
+        _,headers=register(client)
+        token=client.cookies.get("fraudshield_session")
+        with DB() as db:
+            db.get(Session,digest(token)).expires=0;db.commit()
+        assert client.get("/api/auth/me").status_code==401
+        client.cookies.clear()
+        for _ in range(10):
+            response=client.post("/api/auth/forgot-password",json={"email":"unknown@example.test"})
+        assert response.status_code==429
+
+def test_expired_cookie_does_not_prevent_login():
+    with TestClient(app) as client:
+        address,_=register(client)
+        with DB() as db:
+            db.get(Session,digest(client.cookies.get("fraudshield_session"))).expires=0;db.commit()
+        response=client.post("/api/auth/login",json={"email":address,"password":"Long-test-password-42!"})
+        assert response.status_code==200

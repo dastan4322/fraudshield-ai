@@ -1,11 +1,36 @@
 services:
+  database:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: fraudshield
+      POSTGRES_USER: fraudshield
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your local .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fraudshield -d fraudshield"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
   backend:
     build: ./backend
     environment:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
-      WORKSPACE_TOKEN: ${WORKSPACE_TOKEN:-}
+      DATABASE_URL: postgresql+psycopg://fraudshield:${POSTGRES_PASSWORD}@database:5432/fraudshield
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:3000}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_FROM: ${SMTP_FROM:-noreply@localhost}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_TLS: ${SMTP_TLS:-true}
     ports:
       - "127.0.0.1:8000:8000"
+    depends_on:
+      database:
+        condition: service_healthy
     mem_limit: 2g
     cpus: 2
     restart: unless-stopped
@@ -20,3 +45,6 @@ services:
       backend:
         condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  postgres_data:

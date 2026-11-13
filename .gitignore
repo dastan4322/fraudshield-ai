@@ -218,3 +218,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local application data and credentials
+.env
+.env.*
+!.env.example
+.venv/
+node_modules/
+.next/
+artifacts/
+uploads/
+*.joblib
+*.sqlite*
+*.csv
+!sample_data/synthetic.csv
